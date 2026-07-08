@@ -1,0 +1,5 @@
+date,method,peso_amount,usd_amount,adjustment_usd,notes
+2026-07-01,ATM,20000.00,330.09,4.08,BPI ATM with rebate
+2026-07-02,Wise,10035.00,162.86,-1.21,Wise transfer with fee
+2026-07-05,ATM,15000.00,247.50,4.08,BDO ATM
+2026-07-06,Wise,25000.00,405.72,-2.15,Larger Wise transfer
