@@ -1,8 +1,8 @@
-# Peso Withdrawal / Conversion Tracker
+# PesoRate Tracker
 
 A small local app for tracking Philippine peso withdrawals (from ATMs) and
 Wise USD-to-PHP conversions. It automatically calculates your **effective
-exchange rate** on each transaction and compares it against a monthly
+exchange rate** on each transaction and compares it against a daily
 reference rate you set.
 
 No cloud accounts, no logins, no API keys. Everything is stored in local
@@ -54,11 +54,12 @@ To stop the app, press `Ctrl+C` in the terminal.
 
 ## Using the app
 
-### Set a monthly reference rate (sidebar)
+### Set a daily reference rate (sidebar)
 
-Use the left sidebar to enter the reference rate for a given month/year.
-This is the rate you'll compare each transaction against. Saving with the
-same month/year again will update the existing rate.
+Use the left sidebar to enter the reference rate for a given date. This is
+the rate you'll compare each transaction against. Saving with the same date
+again will update the existing rate. Only transactions on days that have a
+saved rate will show a comparison.
 
 ### Add a transaction (main page)
 
@@ -68,37 +69,28 @@ Fill in:
 - **Method** — `ATM` or `Wise`.
 - **Peso Amount** — pesos received or converted.
 - **USD Amount** — USD debited from your account.
-- **Adjustment (USD)** — signed rebate or fee (see below).
+- **Fees (USD)** — any USD fee paid on the transaction (ATM surcharge or
+  Wise fee). Positive number; leave at `0` if none.
 - **Notes** — anything you want to remember (which bank, which card, etc.).
 
 Click **Save Transaction**.
 
-### The Adjustment field — SIGNED
-
-This field is signed, so the sign matters:
-
-- **ATM rebate of $4.08** → enter `4.08` (positive)
-- **Wise fee of $1.21** → enter `-1.21` (negative)
-
-The formula treats rebates as reducing your USD cost, and fees as adding
-to it.
-
 ### Calculations
 
 ```
-net_usd_cost   = usd_amount - adjustment_usd
+net_usd_cost   = usd_amount + fees_usd
 effective_rate = peso_amount / net_usd_cost
 ```
 
-**Example 1 — ATM with rebate**
+**Example 1 — ATM with surcharge**
 
 ```
 peso_amount    = 20,000.00
 usd_amount     = 330.09
-adjustment     = 4.08
+fees           = 4.08
 
-net_usd_cost   = 330.09 - 4.08 = 326.01
-effective_rate = 20000 / 326.01 = 61.3478
+net_usd_cost   = 330.09 + 4.08 = 334.17
+effective_rate = 20000 / 334.17 = 59.8497
 ```
 
 **Example 2 — Wise with fee**
@@ -106,13 +98,13 @@ effective_rate = 20000 / 326.01 = 61.3478
 ```
 peso_amount    = 10,035.00
 usd_amount     = 162.86
-adjustment     = -1.21
+fees           = 1.21
 
-net_usd_cost   = 162.86 - (-1.21) = 164.07
+net_usd_cost   = 162.86 + 1.21 = 164.07
 effective_rate = 10035 / 164.07 = 61.1629
 ```
 
-### Comparison against the monthly reference rate
+### Comparison against the daily reference rate
 
 For each transaction, the app also computes:
 
@@ -122,13 +114,13 @@ reference_usd_cost          = peso_amount / reference_rate
 usd_gain_loss_vs_reference  = reference_usd_cost - net_usd_cost
 ```
 
-- **Positive** gain/loss = you did **better** than the monthly reference.
-- **Negative** gain/loss = you did **worse** than the monthly reference.
+- **Positive** gain/loss = you did **better** than that day's reference.
+- **Negative** gain/loss = you did **worse** than that day's reference.
 
 ### Monthly summary
 
 Grouped by month, showing total pesos, total net USD cost, average
-effective rate overall and per method, total ATM rebates, total Wise fees,
+effective rate overall and per method, total ATM fees, total Wise fees,
 total gain/loss vs. reference, and which method had the better average
 effective rate that month.
 
@@ -147,7 +139,7 @@ withdrawal_tracker/
   README.md            # this file
   data/
     transactions.csv   # your saved transactions
-    monthly_rates.csv  # your monthly reference rates
+    daily_rates.csv    # your daily reference rates
   sample_data.csv      # example rows in the expected format
 ```
 

@@ -13,21 +13,22 @@ from io import StringIO
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as st_components
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 TRANSACTIONS_CSV = os.path.join(DATA_DIR, "transactions.csv")
-MONTHLY_RATES_CSV = os.path.join(DATA_DIR, "monthly_rates.csv")
+DAILY_RATES_CSV = os.path.join(DATA_DIR, "daily_rates.csv")
 
 TRANSACTION_COLUMNS = [
     "date",
     "method",
     "peso_amount",
     "usd_amount",
-    "adjustment_usd",
+    "fees_usd",
     "notes",
 ]
 
-MONTHLY_RATE_COLUMNS = ["month", "year", "reference_rate"]
+DAILY_RATE_COLUMNS = ["date", "reference_rate"]
 
 METHODS = ["ATM", "Wise"]
 
@@ -37,8 +38,8 @@ def ensure_storage() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(TRANSACTIONS_CSV):
         pd.DataFrame(columns=TRANSACTION_COLUMNS).to_csv(TRANSACTIONS_CSV, index=False)
-    if not os.path.exists(MONTHLY_RATES_CSV):
-        pd.DataFrame(columns=MONTHLY_RATE_COLUMNS).to_csv(MONTHLY_RATES_CSV, index=False)
+    if not os.path.exists(DAILY_RATES_CSV):
+        pd.DataFrame(columns=DAILY_RATE_COLUMNS).to_csv(DAILY_RATES_CSV, index=False)
 
 
 def load_transactions() -> pd.DataFrame:
@@ -48,22 +49,21 @@ def load_transactions() -> pd.DataFrame:
             df[col] = pd.Series(dtype="object")
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        for col in ("peso_amount", "usd_amount", "adjustment_usd"):
+        for col in ("peso_amount", "usd_amount", "fees_usd"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["notes"] = df["notes"].fillna("")
     return df[TRANSACTION_COLUMNS]
 
 
-def load_monthly_rates() -> pd.DataFrame:
-    df = pd.read_csv(MONTHLY_RATES_CSV)
-    for col in MONTHLY_RATE_COLUMNS:
+def load_daily_rates() -> pd.DataFrame:
+    df = pd.read_csv(DAILY_RATES_CSV)
+    for col in DAILY_RATE_COLUMNS:
         if col not in df.columns:
-            df[col] = pd.Series(dtype="float")
+            df[col] = pd.Series(dtype="object")
     if not df.empty:
-        df["month"] = pd.to_numeric(df["month"], errors="coerce").astype("Int64")
-        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
         df["reference_rate"] = pd.to_numeric(df["reference_rate"], errors="coerce")
-    return df[MONTHLY_RATE_COLUMNS]
+    return df[DAILY_RATE_COLUMNS]
 
 
 def append_transaction(row: dict) -> None:
@@ -73,19 +73,19 @@ def append_transaction(row: dict) -> None:
     combined.to_csv(TRANSACTIONS_CSV, index=False)
 
 
-def upsert_monthly_rate(month: int, year: int, rate: float) -> None:
-    df = load_monthly_rates()
-    mask = (df["month"] == month) & (df["year"] == year)
+def upsert_daily_rate(rate_date: date_cls, rate: float) -> None:
+    df = load_daily_rates()
+    mask = df["date"] == rate_date
     if mask.any():
         df.loc[mask, "reference_rate"] = rate
     else:
         new_row = pd.DataFrame(
-            [{"month": month, "year": year, "reference_rate": rate}],
-            columns=MONTHLY_RATE_COLUMNS,
+            [{"date": rate_date, "reference_rate": rate}],
+            columns=DAILY_RATE_COLUMNS,
         )
         df = pd.concat([df, new_row], ignore_index=True)
-    df.sort_values(["year", "month"], inplace=True)
-    df.to_csv(MONTHLY_RATES_CSV, index=False)
+    df.sort_values("date", inplace=True)
+    df.to_csv(DAILY_RATES_CSV, index=False)
 
 
 def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
@@ -106,7 +106,7 @@ def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
         )
 
     df = tx.copy()
-    df["net_usd_cost"] = df["usd_amount"] - df["adjustment_usd"]
+    df["net_usd_cost"] = df["usd_amount"] + df["fees_usd"]
     df["effective_rate"] = df["peso_amount"] / df["net_usd_cost"]
 
     dates = pd.to_datetime(df["date"], errors="coerce")
@@ -116,8 +116,8 @@ def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
     if rates.empty:
         df["reference_rate"] = pd.NA
     else:
-        rates_slim = rates.dropna(subset=["month", "year", "reference_rate"])
-        df = df.merge(rates_slim, on=["month", "year"], how="left")
+        rates_slim = rates.dropna(subset=["date", "reference_rate"])
+        df = df.merge(rates_slim, on="date", how="left")
 
     df["rate_difference"] = df["effective_rate"] - df["reference_rate"]
     df["reference_usd_cost"] = df["peso_amount"] / df["reference_rate"]
@@ -132,11 +132,11 @@ def build_monthly_summary(enriched: pd.DataFrame) -> pd.DataFrame:
     df = enriched.copy()
     df["atm_effective_rate"] = df["effective_rate"].where(df["method"] == "ATM")
     df["wise_effective_rate"] = df["effective_rate"].where(df["method"] == "Wise")
-    df["atm_rebate"] = df["adjustment_usd"].where(
-        (df["method"] == "ATM") & (df["adjustment_usd"] > 0), 0
+    df["atm_fee"] = df["fees_usd"].where(
+        (df["method"] == "ATM") & (df["fees_usd"] > 0), 0
     )
-    df["wise_fee"] = (-df["adjustment_usd"]).where(
-        (df["method"] == "Wise") & (df["adjustment_usd"] < 0), 0
+    df["wise_fee"] = df["fees_usd"].where(
+        (df["method"] == "Wise") & (df["fees_usd"] > 0), 0
     )
 
     grouped = df.groupby(["year", "month"], dropna=False).agg(
@@ -145,7 +145,7 @@ def build_monthly_summary(enriched: pd.DataFrame) -> pd.DataFrame:
         avg_effective_rate=("effective_rate", "mean"),
         avg_atm_rate=("atm_effective_rate", "mean"),
         avg_wise_rate=("wise_effective_rate", "mean"),
-        total_atm_rebates=("atm_rebate", "sum"),
+        total_atm_fees=("atm_fee", "sum"),
         total_wise_fees=("wise_fee", "sum"),
         total_gain_loss_vs_reference=("usd_gain_loss_vs_reference", "sum"),
     ).reset_index()
@@ -178,7 +178,7 @@ def format_transactions_for_display(enriched: pd.DataFrame) -> pd.DataFrame:
             "method",
             "peso_amount",
             "usd_amount",
-            "adjustment_usd",
+            "fees_usd",
             "net_usd_cost",
             "effective_rate",
             "reference_rate",
@@ -192,10 +192,10 @@ def format_transactions_for_display(enriched: pd.DataFrame) -> pd.DataFrame:
             "method": "Method",
             "peso_amount": "Peso Amount",
             "usd_amount": "USD Amount",
-            "adjustment_usd": "Adjustment",
+            "fees_usd": "Fees",
             "net_usd_cost": "Net USD Cost",
             "effective_rate": "Effective Rate",
-            "reference_rate": "Monthly Reference Rate",
+            "reference_rate": "Daily Reference Rate",
             "rate_difference": "Rate Difference",
             "usd_gain_loss_vs_reference": "USD Gain/Loss vs Reference",
             "notes": "Notes",
@@ -225,7 +225,7 @@ def format_summary_for_display(summary: pd.DataFrame) -> pd.DataFrame:
             "avg_effective_rate",
             "avg_atm_rate",
             "avg_wise_rate",
-            "total_atm_rebates",
+            "total_atm_fees",
             "total_wise_fees",
             "total_gain_loss_vs_reference",
             "best_method",
@@ -237,7 +237,7 @@ def format_summary_for_display(summary: pd.DataFrame) -> pd.DataFrame:
             "avg_effective_rate": "Avg Effective Rate",
             "avg_atm_rate": "Avg ATM Rate",
             "avg_wise_rate": "Avg Wise Rate",
-            "total_atm_rebates": "Total ATM Rebates",
+            "total_atm_fees": "Total ATM Fees",
             "total_wise_fees": "Total Wise Fees",
             "total_gain_loss_vs_reference": "Total Gain/Loss vs Ref",
             "best_method": "Best Method",
@@ -252,32 +252,148 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
-def render_transaction_form() -> None:
-    st.subheader("Add Transaction")
-    with st.form("transaction_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            tx_date = st.date_input("Date", value=date_cls.today())
-            method = st.selectbox("Method", METHODS)
-            peso_amount = st.number_input(
-                "Peso Amount", min_value=0.0, step=100.0, format="%.2f"
-            )
-        with col2:
-            usd_amount = st.number_input(
-                "USD Amount", min_value=0.0, step=1.0, format="%.2f"
-            )
-            adjustment_usd = st.number_input(
-                "Adjustment (USD)",
-                value=0.0,
-                step=0.01,
-                format="%.2f",
-                help="Positive for ATM rebates, negative for Wise fees.",
-            )
-            notes = st.text_input("Notes", value="")
+def _rate_for(rates: pd.DataFrame, d: date_cls) -> float | None:
+    if rates.empty:
+        return None
+    match = rates[rates["date"] == d]
+    if match.empty:
+        return None
+    val = match["reference_rate"].iloc[0]
+    return None if pd.isna(val) else float(val)
 
-        submitted = st.form_submit_button("Save Transaction")
+
+def render_transaction_form(rates: pd.DataFrame) -> None:
+    st.subheader("Add Transaction")
+
+    today = date_cls.today()
+    if _rate_for(rates, today) is None:
+        st.warning(
+            f"No Daily Reference Rate saved for today ({today.isoformat()}). "
+            "Add one in the **Daily Reference Rate** section on the left sidebar "
+            "to enable auto-conversion between USD and Peso."
+        )
+
+    defaults = {
+        "tx_date": today,
+        "tx_method": METHODS[0],
+        "tx_peso": 0.0,
+        "tx_usd": 0.0,
+        "tx_fees": 0.0,
+        "tx_notes": "",
+    }
+    if st.session_state.pop("_tx_reset", False):
+        for k, v in defaults.items():
+            st.session_state[k] = v
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
+
+    last_saved = st.session_state.pop("_tx_last_saved", None)
+    if last_saved:
+        st.success(last_saved)
+
+    def on_usd_change() -> None:
+        if st.session_state.tx_usd <= 0:
+            return
+        r = _rate_for(rates, st.session_state.tx_date)
+        if r:
+            st.session_state.tx_peso = round(st.session_state.tx_usd * r, 2)
+        else:
+            st.session_state._missing_rate_notify = st.session_state.tx_date
+
+    def on_peso_change() -> None:
+        if st.session_state.tx_peso <= 0:
+            return
+        r = _rate_for(rates, st.session_state.tx_date)
+        if r:
+            st.session_state.tx_usd = round(st.session_state.tx_peso / r, 2)
+        else:
+            st.session_state._missing_rate_notify = st.session_state.tx_date
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.date_input("Date", key="tx_date")
+        st.number_input(
+            "USD Amount",
+            min_value=0.0,
+            step=1.0,
+            format="%.2f",
+            key="tx_usd",
+            on_change=on_usd_change,
+        )
+        st.number_input(
+            "Peso Amount",
+            min_value=0.0,
+            step=100.0,
+            format="%.2f",
+            key="tx_peso",
+            on_change=on_peso_change,
+        )
+    with col2:
+        st.selectbox("Method", METHODS, key="tx_method")
+        st.number_input(
+            "Fees (USD)",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            key="tx_fees",
+        )
+        st.text_input("Notes", key="tx_notes")
+
+    st_components.html(
+        """
+        <script>
+        (function () {
+            const doc = window.parent.document;
+            const attach = () => {
+                doc.querySelectorAll('input[type="number"]').forEach(inp => {
+                    if (inp.closest('[data-testid="stSidebar"]')) return;
+                    if (inp.dataset.autoselectAttached === 'true') return;
+                    inp.dataset.autoselectAttached = 'true';
+                    inp.addEventListener('focus', () => setTimeout(() => inp.select(), 0));
+                });
+            };
+            attach();
+            setTimeout(attach, 300);
+            setTimeout(attach, 1000);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+    notify_date = st.session_state.pop("_missing_rate_notify", None)
+    if notify_date:
+        st.toast(
+            f"No daily reference rate for {notify_date.isoformat()} — "
+            "please add one in the Daily Reference Rate section."
+        )
+        st_components.html(
+            """
+            <script>
+                setTimeout(function () {
+                    try {
+                        const doc = window.parent.document;
+                        const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                        if (!sidebar) return;
+                        const input = sidebar.querySelector('input');
+                        if (input) input.focus();
+                    } catch (e) {}
+                }, 150);
+            </script>
+            """,
+            height=0,
+        )
+
+    submitted = st.button("Save Transaction")
 
     if submitted:
+        tx_date = st.session_state.tx_date
+        method = st.session_state.tx_method
+        peso_amount = float(st.session_state.tx_peso)
+        usd_amount = float(st.session_state.tx_usd)
+        fees_usd = float(st.session_state.tx_fees)
+        notes = st.session_state.tx_notes
+
         errors = []
         if tx_date is None:
             errors.append("Date is required.")
@@ -287,9 +403,9 @@ def render_transaction_form() -> None:
             errors.append("Peso amount must be greater than zero.")
         if usd_amount <= 0:
             errors.append("USD amount must be greater than zero.")
-        net = usd_amount - adjustment_usd
+        net = usd_amount + fees_usd
         if net <= 0:
-            errors.append("Net USD cost (USD - adjustment) must be greater than zero.")
+            errors.append("Net USD cost must be greater than zero.")
 
         if errors:
             for err in errors:
@@ -300,27 +416,24 @@ def render_transaction_form() -> None:
             {
                 "date": tx_date.isoformat(),
                 "method": method,
-                "peso_amount": round(float(peso_amount), 2),
-                "usd_amount": round(float(usd_amount), 2),
-                "adjustment_usd": round(float(adjustment_usd), 2),
+                "peso_amount": round(peso_amount, 2),
+                "usd_amount": round(usd_amount, 2),
+                "fees_usd": round(fees_usd, 2),
                 "notes": notes.strip(),
             }
         )
-        st.success(
+        st.session_state._tx_last_saved = (
             f"Saved: {method} on {tx_date.isoformat()} — "
             f"effective rate {peso_amount / net:.4f}"
         )
+        st.session_state._tx_reset = True
         st.rerun()
 
 
-def render_monthly_rate_sidebar(rates: pd.DataFrame) -> None:
-    st.sidebar.header("Monthly Reference Rate")
-    today = date_cls.today()
-    with st.sidebar.form("monthly_rate_form", clear_on_submit=False):
-        month = st.number_input("Month", min_value=1, max_value=12, value=today.month, step=1)
-        year = st.number_input(
-            "Year", min_value=2000, max_value=2100, value=today.year, step=1
-        )
+def render_daily_rate_sidebar(rates: pd.DataFrame) -> None:
+    st.sidebar.header("Daily Reference Rate")
+    with st.sidebar.form("daily_rate_form", clear_on_submit=False):
+        rate_date = st.date_input("Date", value=date_cls.today())
         reference_rate = st.number_input(
             "Reference Rate (PHP per USD)",
             min_value=0.0,
@@ -332,19 +445,19 @@ def render_monthly_rate_sidebar(rates: pd.DataFrame) -> None:
     if submitted:
         if reference_rate <= 0:
             st.sidebar.error("Reference rate must be greater than zero.")
+        elif rate_date is None:
+            st.sidebar.error("Date is required.")
         else:
-            upsert_monthly_rate(int(month), int(year), float(reference_rate))
-            st.sidebar.success(f"Saved rate for {int(year)}-{int(month):02d}: {reference_rate:.4f}")
+            upsert_daily_rate(rate_date, float(reference_rate))
+            st.sidebar.success(f"Saved rate for {rate_date.isoformat()}: {reference_rate:.4f}")
             st.rerun()
 
     if not rates.empty:
         st.sidebar.markdown("**Saved Rates**")
-        display_rates = rates.copy()
-        display_rates["Period"] = display_rates.apply(
-            lambda r: f"{int(r['year']):04d}-{int(r['month']):02d}", axis=1
-        )
+        display_rates = rates.copy().sort_values("date", ascending=False)
+        display_rates["Date"] = pd.to_datetime(display_rates["date"], errors="coerce").dt.strftime("%Y-%m-%d")
         st.sidebar.dataframe(
-            display_rates[["Period", "reference_rate"]].rename(
+            display_rates[["Date", "reference_rate"]].rename(
                 columns={"reference_rate": "Rate"}
             ),
             hide_index=True,
@@ -353,15 +466,15 @@ def render_monthly_rate_sidebar(rates: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Peso Withdrawal / Conversion Tracker", layout="wide")
+    st.set_page_config(page_title="PesoRate Tracker", layout="wide")
     ensure_storage()
 
-    st.title("Peso Withdrawal / Conversion Tracker")
+    st.title("PesoRate Tracker")
 
-    rates = load_monthly_rates()
-    render_monthly_rate_sidebar(rates)
+    rates = load_daily_rates()
+    render_daily_rate_sidebar(rates)
 
-    render_transaction_form()
+    render_transaction_form(rates)
 
     transactions = load_transactions()
     enriched = enrich_transactions(transactions, rates)
@@ -380,10 +493,10 @@ def main() -> None:
             column_config={
                 "Peso Amount": st.column_config.NumberColumn(format="%.2f"),
                 "USD Amount": st.column_config.NumberColumn(format="%.2f"),
-                "Adjustment": st.column_config.NumberColumn(format="%.2f"),
+                "Fees": st.column_config.NumberColumn(format="%.2f"),
                 "Net USD Cost": st.column_config.NumberColumn(format="%.2f"),
                 "Effective Rate": st.column_config.NumberColumn(format="%.4f"),
-                "Monthly Reference Rate": st.column_config.NumberColumn(format="%.4f"),
+                "Daily Reference Rate": st.column_config.NumberColumn(format="%.4f"),
                 "Rate Difference": st.column_config.NumberColumn(format="%.4f"),
                 "USD Gain/Loss vs Reference": st.column_config.NumberColumn(format="%.2f"),
             },
@@ -411,7 +524,7 @@ def main() -> None:
                 "Avg Effective Rate": st.column_config.NumberColumn(format="%.4f"),
                 "Avg ATM Rate": st.column_config.NumberColumn(format="%.4f"),
                 "Avg Wise Rate": st.column_config.NumberColumn(format="%.4f"),
-                "Total ATM Rebates": st.column_config.NumberColumn(format="%.2f"),
+                "Total ATM Fees": st.column_config.NumberColumn(format="%.2f"),
                 "Total Wise Fees": st.column_config.NumberColumn(format="%.2f"),
                 "Total Gain/Loss vs Ref": st.column_config.NumberColumn(format="%.2f"),
             },
