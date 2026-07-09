@@ -8,14 +8,16 @@ against a monthly reference rate.
 from __future__ import annotations
 
 import os
-from datetime import date as date_cls
+from datetime import date as date_cls, datetime
 from io import StringIO
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as st_components
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+REPORTS_DIR = os.path.join(BASE_DIR, "reports")
 TRANSACTIONS_CSV = os.path.join(DATA_DIR, "transactions.csv")
 DAILY_RATES_CSV = os.path.join(DATA_DIR, "daily_rates.csv")
 
@@ -36,10 +38,17 @@ METHODS = ["ATM", "Wise"]
 def ensure_storage() -> None:
     """Create data directory and empty CSV files if they don't exist."""
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     if not os.path.exists(TRANSACTIONS_CSV):
         pd.DataFrame(columns=TRANSACTION_COLUMNS).to_csv(TRANSACTIONS_CSV, index=False)
     if not os.path.exists(DAILY_RATES_CSV):
         pd.DataFrame(columns=DAILY_RATE_COLUMNS).to_csv(DAILY_RATES_CSV, index=False)
+
+
+def save_report_snapshot(df: pd.DataFrame, prefix: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    path = os.path.join(REPORTS_DIR, f"{prefix}_{ts}.csv")
+    df.to_csv(path, index=False)
 
 
 def load_transactions() -> pd.DataFrame:
@@ -506,6 +515,8 @@ def main() -> None:
             data=df_to_csv_bytes(display),
             file_name="transactions_export.csv",
             mime="text/csv",
+            on_click=save_report_snapshot,
+            args=(display, "transactions_report"),
         )
 
     st.subheader("Monthly Summary")
@@ -534,6 +545,8 @@ def main() -> None:
             data=df_to_csv_bytes(summary_display),
             file_name="monthly_summary_export.csv",
             mime="text/csv",
+            on_click=save_report_snapshot,
+            args=(summary_display, "monthly_summary_report"),
         )
 
 
