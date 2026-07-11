@@ -258,13 +258,15 @@ def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
     df["effective_rate"] = df["peso_amount"] / df["net_usd_cost"]
 
     dates = pd.to_datetime(df["date"], errors="coerce")
+    df["date"] = dates.dt.date
     df["month"] = dates.dt.month.astype("Int64")
     df["year"] = dates.dt.year.astype("Int64")
 
     if rates.empty:
         df["reference_rate"] = pd.NA
     else:
-        rates_slim = rates.dropna(subset=["date", "reference_rate"])
+        rates_slim = rates.dropna(subset=["date", "reference_rate"]).copy()
+        rates_slim["date"] = pd.to_datetime(rates_slim["date"], errors="coerce").dt.date
         df = df.merge(rates_slim, on="date", how="left")
 
     df["rate_difference"] = df["effective_rate"] - df["reference_rate"]
@@ -471,7 +473,7 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
 
         append_transaction(
             {
-                "date": tx_date.isoformat(),
+                "date": tx_date,
                 "method": tx_method,
                 "peso_amount": round(peso_amount, 2),
                 "usd_amount": round(usd_amount, 2),
