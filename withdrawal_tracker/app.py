@@ -19,7 +19,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 REPORTS_DIR = os.path.join(BASE_DIR, "reports")
 TRANSACTIONS_CSV = os.path.join(DATA_DIR, "transactions.csv")
-DAILY_RATES_CSV = os.path.join(DATA_DIR, "daily_rates.csv")
 
 # When true, persist data to CSV files under data/ (local single-user mode).
 # When false (default), data lives in st.session_state and each browser tab is
@@ -45,7 +44,20 @@ DAILY_RATE_COLUMNS = ["date", "reference_rate"]
 METHODS = ["ATM", "Wise"]
 
 
+# Map display-format column names back to raw column names so a CSV downloaded
+# from the app's Transactions table can be re-uploaded as-is.
+TRANSACTIONS_DISPLAY_TO_RAW = {
+    "Date": "date",
+    "Method": "method",
+    "Peso Amount": "peso_amount",
+    "USD Amount": "usd_amount",
+    "Fees": "fees_usd",
+    "Notes": "notes",
+}
+
+
 def _clean_transactions(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns=TRANSACTIONS_DISPLAY_TO_RAW)
     for col in TRANSACTION_COLUMNS:
         if col not in df.columns:
             df[col] = pd.Series(dtype="object")
@@ -57,26 +69,14 @@ def _clean_transactions(df: pd.DataFrame) -> pd.DataFrame:
     return df[TRANSACTION_COLUMNS].reset_index(drop=True)
 
 
-def _clean_daily_rates(df: pd.DataFrame) -> pd.DataFrame:
-    for col in DAILY_RATE_COLUMNS:
-        if col not in df.columns:
-            df[col] = pd.Series(dtype="object")
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        df["reference_rate"] = pd.to_numeric(df["reference_rate"], errors="coerce")
-    return df[DAILY_RATE_COLUMNS].reset_index(drop=True)
-
-
 def ensure_storage() -> None:
-    """Create data/reports directories and empty CSV files in LOCAL_MODE."""
+    """Create data/reports directories and empty transactions CSV in LOCAL_MODE."""
     if not LOCAL_MODE:
         return
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(REPORTS_DIR, exist_ok=True)
     if not os.path.exists(TRANSACTIONS_CSV):
         pd.DataFrame(columns=TRANSACTION_COLUMNS).to_csv(TRANSACTIONS_CSV, index=False)
-    if not os.path.exists(DAILY_RATES_CSV):
-        pd.DataFrame(columns=DAILY_RATE_COLUMNS).to_csv(DAILY_RATES_CSV, index=False)
 
 
 def save_report_snapshot(df: pd.DataFrame, prefix: str) -> None:
@@ -97,8 +97,6 @@ def load_transactions() -> pd.DataFrame:
 
 
 def load_daily_rates() -> pd.DataFrame:
-    if LOCAL_MODE:
-        return _clean_daily_rates(pd.read_csv(DAILY_RATES_CSV))
     df = st.session_state.get("daily_rates_df")
     if df is None:
         return pd.DataFrame(columns=DAILY_RATE_COLUMNS)
@@ -127,10 +125,7 @@ def upsert_daily_rate(rate_date: date_cls, rate: float) -> None:
         )
         df = pd.concat([df, new_row], ignore_index=True)
     df = df.sort_values("date").reset_index(drop=True)
-    if LOCAL_MODE:
-        df.to_csv(DAILY_RATES_CSV, index=False)
-    else:
-        st.session_state.daily_rates_df = df
+    st.session_state.daily_rates_df = df
 
 
 def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
@@ -413,14 +408,15 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
 
 
 def render_data_io_sidebar() -> None:
-    """Session-mode-only sidebar section: upload prior CSVs into this tab."""
+    """Session-mode-only sidebar section: upload prior CSV into this tab."""
     if LOCAL_MODE:
         return
     st.sidebar.header("Load / Save Data")
     st.sidebar.caption(
-        "Your data lives only in this browser tab. Upload a saved CSV to pick "
-        "up where you left off, and use the **Download** buttons under each "
-        "table to save your progress before closing."
+        "Your transactions live only in this browser tab. Upload a saved "
+        "**transactions.csv** to pick up where you left off, and use the "
+        "**Download** button under the Transactions table to save your "
+        "progress before closing."
     )
 
     tx_file = st.sidebar.file_uploader(
@@ -440,21 +436,6 @@ def render_data_io_sidebar() -> None:
             except Exception as e:
                 st.sidebar.error(f"Could not read transactions CSV: {e}")
 
-    rates_file = st.sidebar.file_uploader(
-        "Load daily rates CSV", type="csv", key="rates_upload"
-    )
-    if rates_file is not None:
-        fid = getattr(rates_file, "file_id", None) or rates_file.name
-        if st.session_state.get("_rates_upload_fid") != fid:
-            try:
-                df = _clean_daily_rates(pd.read_csv(rates_file))
-                st.session_state.daily_rates_df = df
-                st.session_state._rates_upload_fid = fid
-                st.sidebar.success(f"Loaded {len(df)} rate(s) from {rates_file.name}")
-                st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"Could not read daily rates CSV: {e}")
-
     st.sidebar.divider()
 
 
@@ -468,9 +449,10 @@ def render_onboarding(transactions: pd.DataFrame) -> None:
         "true effective rate on each transaction and compare it against a "
         "reference rate.\n\n"
         "- **Starting fresh?** Just add your first transaction using the form below.\n"
-        "- **Coming back?** Upload your saved CSVs from **Load / Save Data** in the sidebar.\n\n"
-        "Your data lives only in this browser tab — **use the Download buttons "
-        "under each table before closing** to save your progress."
+        "- **Coming back?** Upload your saved **transactions.csv** from **Load / Save Data** in the sidebar.\n\n"
+        "Your data lives only in this browser tab — **use the Download button "
+        "under the Transactions table before closing** to save your progress. "
+        "Daily reference rates are session-only; re-enter them each visit."
     )
 
 
@@ -500,10 +482,11 @@ def render_daily_rate_sidebar(rates: pd.DataFrame) -> None:
         st.sidebar.markdown("**Saved Rates**")
         display_rates = rates.copy().sort_values("date", ascending=False)
         display_rates["Date"] = pd.to_datetime(display_rates["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        rates_table = display_rates[["Date", "reference_rate"]].rename(
+            columns={"reference_rate": "Rate"}
+        )
         st.sidebar.dataframe(
-            display_rates[["Date", "reference_rate"]].rename(
-                columns={"reference_rate": "Rate"}
-            ),
+            rates_table,
             hide_index=True,
             use_container_width=True,
         )
@@ -579,14 +562,6 @@ def main() -> None:
                 "Total Wise Fees": st.column_config.NumberColumn(format="%.2f"),
                 "Total Gain/Loss vs Ref": st.column_config.NumberColumn(format="%.2f"),
             },
-        )
-        st.download_button(
-            "Download summary CSV",
-            data=df_to_csv_bytes(summary_display),
-            file_name="summary_export.csv",
-            mime="text/csv",
-            on_click=save_report_snapshot,
-            args=(summary_display, "summary_report"),
         )
 
 

@@ -6,5 +6,4 @@ __pycache__/
 
 # Personal transaction data — do not commit
 withdrawal_tracker/data/transactions.csv
-withdrawal_tracker/data/daily_rates.csv
 withdrawal_tracker/reports/

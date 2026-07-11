@@ -147,10 +147,10 @@ withdrawal_tracker/
   requirements.txt     # Python dependencies
   README.md            # this file
   data/
-    transactions.csv   # your saved transactions
-    daily_rates.csv    # your daily reference rates
+    transactions.csv   # your saved transactions (local mode only)
   sample_data.csv      # example rows in the expected format
 ```
 
-CSV files are created automatically the first time you run the app. Your
-data never leaves your computer.
+`transactions.csv` is created automatically the first time you run the
+app in local mode. Daily reference rates are session-only — enter them
+each session as needed for comparison against your transactions.
