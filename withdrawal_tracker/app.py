@@ -458,7 +458,7 @@ def render_onboarding(transactions: pd.DataFrame) -> None:
 
 def render_daily_rate_sidebar(rates: pd.DataFrame) -> None:
     st.sidebar.header("Daily Reference Rate")
-    with st.sidebar.form("daily_rate_form", clear_on_submit=False):
+    with st.sidebar.form("daily_rate_form", clear_on_submit=True):
         rate_date = st.date_input("Date", value=date_cls.today())
         reference_rate = st.number_input(
             "Reference Rate (PHP per USD)",
