@@ -21,6 +21,16 @@ REPORTS_DIR = os.path.join(BASE_DIR, "reports")
 TRANSACTIONS_CSV = os.path.join(DATA_DIR, "transactions.csv")
 DAILY_RATES_CSV = os.path.join(DATA_DIR, "daily_rates.csv")
 
+# When true, persist data to CSV files under data/ (local single-user mode).
+# When false (default), data lives in st.session_state and each browser tab is
+# an independent session — used for the deployed multi-user version.
+LOCAL_MODE = os.environ.get("PESORATE_LOCAL_MODE", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 TRANSACTION_COLUMNS = [
     "date",
     "method",
@@ -35,8 +45,32 @@ DAILY_RATE_COLUMNS = ["date", "reference_rate"]
 METHODS = ["ATM", "Wise"]
 
 
+def _clean_transactions(df: pd.DataFrame) -> pd.DataFrame:
+    for col in TRANSACTION_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        for col in ("peso_amount", "usd_amount", "fees_usd"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["notes"] = df["notes"].fillna("")
+    return df[TRANSACTION_COLUMNS].reset_index(drop=True)
+
+
+def _clean_daily_rates(df: pd.DataFrame) -> pd.DataFrame:
+    for col in DAILY_RATE_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df["reference_rate"] = pd.to_numeric(df["reference_rate"], errors="coerce")
+    return df[DAILY_RATE_COLUMNS].reset_index(drop=True)
+
+
 def ensure_storage() -> None:
-    """Create data directory and empty CSV files if they don't exist."""
+    """Create data/reports directories and empty CSV files in LOCAL_MODE."""
+    if not LOCAL_MODE:
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(REPORTS_DIR, exist_ok=True)
     if not os.path.exists(TRANSACTIONS_CSV):
@@ -46,40 +80,39 @@ def ensure_storage() -> None:
 
 
 def save_report_snapshot(df: pd.DataFrame, prefix: str) -> None:
+    if not LOCAL_MODE:
+        return
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     path = os.path.join(REPORTS_DIR, f"{prefix}_{ts}.csv")
     df.to_csv(path, index=False)
 
 
 def load_transactions() -> pd.DataFrame:
-    df = pd.read_csv(TRANSACTIONS_CSV)
-    for col in TRANSACTION_COLUMNS:
-        if col not in df.columns:
-            df[col] = pd.Series(dtype="object")
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        for col in ("peso_amount", "usd_amount", "fees_usd"):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["notes"] = df["notes"].fillna("")
-    return df[TRANSACTION_COLUMNS]
+    if LOCAL_MODE:
+        return _clean_transactions(pd.read_csv(TRANSACTIONS_CSV))
+    df = st.session_state.get("transactions_df")
+    if df is None:
+        return pd.DataFrame(columns=TRANSACTION_COLUMNS)
+    return df.copy()
 
 
 def load_daily_rates() -> pd.DataFrame:
-    df = pd.read_csv(DAILY_RATES_CSV)
-    for col in DAILY_RATE_COLUMNS:
-        if col not in df.columns:
-            df[col] = pd.Series(dtype="object")
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        df["reference_rate"] = pd.to_numeric(df["reference_rate"], errors="coerce")
-    return df[DAILY_RATE_COLUMNS]
+    if LOCAL_MODE:
+        return _clean_daily_rates(pd.read_csv(DAILY_RATES_CSV))
+    df = st.session_state.get("daily_rates_df")
+    if df is None:
+        return pd.DataFrame(columns=DAILY_RATE_COLUMNS)
+    return df.copy()
 
 
 def append_transaction(row: dict) -> None:
     df = load_transactions()
     new_row = pd.DataFrame([row], columns=TRANSACTION_COLUMNS)
     combined = pd.concat([df, new_row], ignore_index=True)
-    combined.to_csv(TRANSACTIONS_CSV, index=False)
+    if LOCAL_MODE:
+        combined.to_csv(TRANSACTIONS_CSV, index=False)
+    else:
+        st.session_state.transactions_df = combined
 
 
 def upsert_daily_rate(rate_date: date_cls, rate: float) -> None:
@@ -93,8 +126,11 @@ def upsert_daily_rate(rate_date: date_cls, rate: float) -> None:
             columns=DAILY_RATE_COLUMNS,
         )
         df = pd.concat([df, new_row], ignore_index=True)
-    df.sort_values("date", inplace=True)
-    df.to_csv(DAILY_RATES_CSV, index=False)
+    df = df.sort_values("date").reset_index(drop=True)
+    if LOCAL_MODE:
+        df.to_csv(DAILY_RATES_CSV, index=False)
+    else:
+        st.session_state.daily_rates_df = df
 
 
 def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
@@ -376,6 +412,68 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
         st.rerun()
 
 
+def render_data_io_sidebar() -> None:
+    """Session-mode-only sidebar section: upload prior CSVs into this tab."""
+    if LOCAL_MODE:
+        return
+    st.sidebar.header("Load / Save Data")
+    st.sidebar.caption(
+        "Your data lives only in this browser tab. Upload a saved CSV to pick "
+        "up where you left off, and use the **Download** buttons under each "
+        "table to save your progress before closing."
+    )
+
+    tx_file = st.sidebar.file_uploader(
+        "Load transactions CSV", type="csv", key="tx_upload"
+    )
+    if tx_file is not None:
+        fid = getattr(tx_file, "file_id", None) or tx_file.name
+        if st.session_state.get("_tx_upload_fid") != fid:
+            try:
+                df = _clean_transactions(pd.read_csv(tx_file))
+                st.session_state.transactions_df = df
+                st.session_state._tx_upload_fid = fid
+                st.sidebar.success(
+                    f"Loaded {len(df)} transaction(s) from {tx_file.name}"
+                )
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"Could not read transactions CSV: {e}")
+
+    rates_file = st.sidebar.file_uploader(
+        "Load daily rates CSV", type="csv", key="rates_upload"
+    )
+    if rates_file is not None:
+        fid = getattr(rates_file, "file_id", None) or rates_file.name
+        if st.session_state.get("_rates_upload_fid") != fid:
+            try:
+                df = _clean_daily_rates(pd.read_csv(rates_file))
+                st.session_state.daily_rates_df = df
+                st.session_state._rates_upload_fid = fid
+                st.sidebar.success(f"Loaded {len(df)} rate(s) from {rates_file.name}")
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"Could not read daily rates CSV: {e}")
+
+    st.sidebar.divider()
+
+
+def render_onboarding(transactions: pd.DataFrame) -> None:
+    """Session-mode-only welcome shown until the user has at least one transaction."""
+    if LOCAL_MODE or not transactions.empty:
+        return
+    st.info(
+        "**Welcome to PesoRate Tracker.**  \n"
+        "Track your Wise USD→PHP conversions and ATM withdrawals to see your "
+        "true effective rate on each transaction and compare it against a "
+        "reference rate.\n\n"
+        "- **Starting fresh?** Just add your first transaction using the form below.\n"
+        "- **Coming back?** Upload your saved CSVs from **Load / Save Data** in the sidebar.\n\n"
+        "Your data lives only in this browser tab — **use the Download buttons "
+        "under each table before closing** to save your progress."
+    )
+
+
 def render_daily_rate_sidebar(rates: pd.DataFrame) -> None:
     st.sidebar.header("Daily Reference Rate")
     with st.sidebar.form("daily_rate_form", clear_on_submit=False):
@@ -417,8 +515,13 @@ def main() -> None:
 
     st.title("PesoRate Tracker")
 
+    render_data_io_sidebar()
+
     rates = load_daily_rates()
     render_daily_rate_sidebar(rates)
+
+    transactions = load_transactions()
+    render_onboarding(transactions)
 
     render_transaction_form(rates)
 
