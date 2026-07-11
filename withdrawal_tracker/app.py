@@ -7,6 +7,7 @@ against a daily reference rate.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import date as date_cls, datetime
 from io import StringIO
@@ -14,6 +15,7 @@ from io import StringIO
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as st_components
+from streamlit_local_storage import LocalStorage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -42,6 +44,106 @@ TRANSACTION_COLUMNS = [
 DAILY_RATE_COLUMNS = ["date", "reference_rate"]
 
 METHODS = ["ATM", "Wise"]
+
+LS_DATA_KEY = "pesorate.v1.data"
+
+_LS_INSTANCE: LocalStorage | None = None
+
+
+def _ls() -> LocalStorage:
+    """Lazy singleton for the browser localStorage client."""
+    global _LS_INSTANCE
+    if _LS_INSTANCE is None:
+        _LS_INSTANCE = LocalStorage()
+    return _LS_INSTANCE
+
+
+def _serialize_df(df: pd.DataFrame) -> list[dict]:
+    if df.empty:
+        return []
+    out = df.copy()
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return out.where(pd.notnull(out), None).to_dict(orient="records")
+
+
+def _deserialize_transactions(records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame(columns=TRANSACTION_COLUMNS)
+    df = pd.DataFrame(records)
+    for col in TRANSACTION_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        for col in ("peso_amount", "usd_amount", "fees_usd"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["notes"] = df["notes"].fillna("")
+    return df[TRANSACTION_COLUMNS].reset_index(drop=True)
+
+
+def _deserialize_rates(records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame(columns=DAILY_RATE_COLUMNS)
+    df = pd.DataFrame(records)
+    for col in DAILY_RATE_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df["reference_rate"] = pd.to_numeric(df["reference_rate"], errors="coerce")
+    return df[DAILY_RATE_COLUMNS].reset_index(drop=True)
+
+
+def hydrate_from_local_storage() -> None:
+    """Load persisted state from browser localStorage into session_state.
+
+    localStorage reads are async: on the first rerun after page load, getItem
+    typically returns None while the JS component initializes; it triggers a
+    rerun once the value is available. We give it up to two attempts before
+    treating the session as a fresh (empty) start.
+    """
+    if LOCAL_MODE or st.session_state.get("_ls_hydrated"):
+        return
+
+    raw = _ls().getItem(LS_DATA_KEY)
+    if raw:
+        try:
+            obj = json.loads(raw)
+            st.session_state.transactions_df = _deserialize_transactions(
+                obj.get("transactions", [])
+            )
+            st.session_state.daily_rates_df = _deserialize_rates(
+                obj.get("daily_rates", [])
+            )
+            st.session_state._ls_hydrated = True
+            return
+        except (ValueError, TypeError, KeyError):
+            pass
+
+    attempts = st.session_state.get("_ls_hydrate_attempts", 0) + 1
+    st.session_state._ls_hydrate_attempts = attempts
+    if attempts >= 2:
+        st.session_state._ls_hydrated = True
+
+
+def persist_to_local_storage() -> None:
+    """Write current session_state DataFrames to browser localStorage."""
+    if LOCAL_MODE:
+        return
+    payload = {
+        "transactions": _serialize_df(
+            st.session_state.get(
+                "transactions_df", pd.DataFrame(columns=TRANSACTION_COLUMNS)
+            )
+        ),
+        "daily_rates": _serialize_df(
+            st.session_state.get(
+                "daily_rates_df", pd.DataFrame(columns=DAILY_RATE_COLUMNS)
+            )
+        ),
+    }
+    _ls().setItem(LS_DATA_KEY, json.dumps(payload))
 
 
 # Map display-format column names back to raw column names so a CSV downloaded
@@ -111,6 +213,7 @@ def append_transaction(row: dict) -> None:
         combined.to_csv(TRANSACTIONS_CSV, index=False)
     else:
         st.session_state.transactions_df = combined
+        persist_to_local_storage()
 
 
 def upsert_daily_rate(rate_date: date_cls, rate: float) -> None:
@@ -126,6 +229,7 @@ def upsert_daily_rate(rate_date: date_cls, rate: float) -> None:
         df = pd.concat([df, new_row], ignore_index=True)
     df = df.sort_values("date").reset_index(drop=True)
     st.session_state.daily_rates_df = df
+    persist_to_local_storage()
 
 
 def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
@@ -402,6 +506,7 @@ def render_data_io_sidebar() -> None:
                 df = _clean_transactions(pd.read_csv(tx_file))
                 st.session_state.transactions_df = df
                 st.session_state._tx_upload_fid = fid
+                persist_to_local_storage()
                 st.sidebar.success(
                     f"Loaded {len(df)} transaction(s) from {tx_file.name}"
                 )
@@ -470,6 +575,12 @@ def main() -> None:
     ensure_storage()
 
     st.title("PesoRate Tracker")
+
+    if not LOCAL_MODE and not st.session_state.get("_ls_hydrated"):
+        hydrate_from_local_storage()
+        if not st.session_state.get("_ls_hydrated"):
+            st.info("Loading your saved data from this browser…")
+            return
 
     render_data_io_sidebar()
 
