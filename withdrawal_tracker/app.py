@@ -2,7 +2,7 @@
 
 A local Streamlit app for logging Philippine peso withdrawals (ATM) and
 Wise conversions, computing effective exchange rates, and comparing them
-against a monthly reference rate.
+against a daily reference rate.
 """
 
 from __future__ import annotations
@@ -115,7 +115,10 @@ def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
         )
 
     df = tx.copy()
-    df["net_usd_cost"] = df["usd_amount"] + df["fees_usd"]
+    # Wise fees are already baked into the USD Amount debited; ATM surcharges
+    # are separate charges, so they only add to cost when not refunded.
+    atm_fees = df["fees_usd"].where(df["method"] == "ATM", 0)
+    df["net_usd_cost"] = df["usd_amount"] + atm_fees
     df["effective_rate"] = df["peso_amount"] / df["net_usd_cost"]
 
     dates = pd.to_datetime(df["date"], errors="coerce")
@@ -134,45 +137,38 @@ def enrich_transactions(tx: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_monthly_summary(enriched: pd.DataFrame) -> pd.DataFrame:
+def build_all_time_summary(enriched: pd.DataFrame) -> pd.DataFrame:
     if enriched.empty:
         return pd.DataFrame()
 
     df = enriched.copy()
-    df["atm_effective_rate"] = df["effective_rate"].where(df["method"] == "ATM")
-    df["wise_effective_rate"] = df["effective_rate"].where(df["method"] == "Wise")
-    df["atm_fee"] = df["fees_usd"].where(
-        (df["method"] == "ATM") & (df["fees_usd"] > 0), 0
-    )
-    df["wise_fee"] = df["fees_usd"].where(
-        (df["method"] == "Wise") & (df["fees_usd"] > 0), 0
-    )
+    atm_rates = df["effective_rate"].where(df["method"] == "ATM")
+    wise_rates = df["effective_rate"].where(df["method"] == "Wise")
+    atm_fees = df["fees_usd"].where((df["method"] == "ATM") & (df["fees_usd"] > 0), 0)
+    wise_fees = df["fees_usd"].where((df["method"] == "Wise") & (df["fees_usd"] > 0), 0)
 
-    grouped = df.groupby(["year", "month"], dropna=False).agg(
-        total_peso=("peso_amount", "sum"),
-        total_net_usd_cost=("net_usd_cost", "sum"),
-        avg_effective_rate=("effective_rate", "mean"),
-        avg_atm_rate=("atm_effective_rate", "mean"),
-        avg_wise_rate=("wise_effective_rate", "mean"),
-        total_atm_fees=("atm_fee", "sum"),
-        total_wise_fees=("wise_fee", "sum"),
-        total_gain_loss_vs_reference=("usd_gain_loss_vs_reference", "sum"),
-    ).reset_index()
+    avg_atm = atm_rates.mean()
+    avg_wise = wise_rates.mean()
+    if pd.isna(avg_atm) and pd.isna(avg_wise):
+        best = ""
+    elif pd.isna(avg_atm):
+        best = "Wise"
+    elif pd.isna(avg_wise):
+        best = "ATM"
+    else:
+        best = "ATM" if avg_atm >= avg_wise else "Wise"
 
-    def pick_best(row: pd.Series) -> str:
-        atm, wise = row["avg_atm_rate"], row["avg_wise_rate"]
-        if pd.isna(atm) and pd.isna(wise):
-            return ""
-        if pd.isna(atm):
-            return "Wise"
-        if pd.isna(wise):
-            return "ATM"
-        # Higher pesos-per-dollar means better value for the person converting USD.
-        return "ATM" if atm >= wise else "Wise"
-
-    grouped["best_method"] = grouped.apply(pick_best, axis=1)
-    grouped.sort_values(["year", "month"], inplace=True)
-    return grouped
+    return pd.DataFrame([{
+        "total_peso": df["peso_amount"].sum(),
+        "total_net_usd_cost": df["net_usd_cost"].sum(),
+        "avg_effective_rate": df["effective_rate"].mean(),
+        "avg_atm_rate": avg_atm,
+        "avg_wise_rate": avg_wise,
+        "total_atm_fees": atm_fees.sum(),
+        "total_wise_fees": wise_fees.sum(),
+        "total_gain_loss_vs_reference": df["usd_gain_loss_vs_reference"].sum(),
+        "best_method": best,
+    }])
 
 
 def format_transactions_for_display(enriched: pd.DataFrame) -> pd.DataFrame:
@@ -217,18 +213,8 @@ def format_summary_for_display(summary: pd.DataFrame) -> pd.DataFrame:
     if summary.empty:
         return summary
 
-    display = summary.copy()
-    display["Month"] = display.apply(
-        lambda r: (
-            f"{int(r['year']):04d}-{int(r['month']):02d}"
-            if pd.notna(r["year"]) and pd.notna(r["month"])
-            else ""
-        ),
-        axis=1,
-    )
-    display = display[
+    display = summary[
         [
-            "Month",
             "total_peso",
             "total_net_usd_cost",
             "avg_effective_rate",
@@ -275,12 +261,6 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
     st.subheader("Add Transaction")
 
     today = date_cls.today()
-    if _rate_for(rates, today) is None:
-        st.warning(
-            f"No Daily Reference Rate saved for today ({today.isoformat()}). "
-            "Add one in the **Daily Reference Rate** section on the left sidebar "
-            "to enable auto-conversion between USD and Peso."
-        )
 
     defaults = {
         "tx_date": today,
@@ -300,24 +280,6 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
     if last_saved:
         st.success(last_saved)
 
-    def on_usd_change() -> None:
-        if st.session_state.tx_usd <= 0:
-            return
-        r = _rate_for(rates, st.session_state.tx_date)
-        if r:
-            st.session_state.tx_peso = round(st.session_state.tx_usd * r, 2)
-        else:
-            st.session_state._missing_rate_notify = st.session_state.tx_date
-
-    def on_peso_change() -> None:
-        if st.session_state.tx_peso <= 0:
-            return
-        r = _rate_for(rates, st.session_state.tx_date)
-        if r:
-            st.session_state.tx_usd = round(st.session_state.tx_peso / r, 2)
-        else:
-            st.session_state._missing_rate_notify = st.session_state.tx_date
-
     col1, col2 = st.columns(2)
     with col1:
         st.date_input("Date", key="tx_date")
@@ -327,7 +289,6 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
             step=1.0,
             format="%.2f",
             key="tx_usd",
-            on_change=on_usd_change,
         )
         st.number_input(
             "Peso Amount",
@@ -335,7 +296,6 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
             step=100.0,
             format="%.2f",
             key="tx_peso",
-            on_change=on_peso_change,
         )
     with col2:
         st.selectbox("Method", METHODS, key="tx_method")
@@ -369,29 +329,6 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
         """,
         height=0,
     )
-
-    notify_date = st.session_state.pop("_missing_rate_notify", None)
-    if notify_date:
-        st.toast(
-            f"No daily reference rate for {notify_date.isoformat()} — "
-            "please add one in the Daily Reference Rate section."
-        )
-        st_components.html(
-            """
-            <script>
-                setTimeout(function () {
-                    try {
-                        const doc = window.parent.document;
-                        const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-                        if (!sidebar) return;
-                        const input = sidebar.querySelector('input');
-                        if (input) input.focus();
-                    } catch (e) {}
-                }, 150);
-            </script>
-            """,
-            height=0,
-        )
 
     submitted = st.button("Save Transaction")
 
@@ -519,10 +456,10 @@ def main() -> None:
             args=(display, "transactions_report"),
         )
 
-    st.subheader("Monthly Summary")
-    summary = build_monthly_summary(enriched)
+    st.subheader("All-Time Summary")
+    summary = build_all_time_summary(enriched)
     if summary.empty:
-        st.info("Monthly summary will appear once transactions are added.")
+        st.info("Summary will appear once transactions are added.")
     else:
         summary_display = format_summary_for_display(summary)
         st.dataframe(
@@ -541,12 +478,12 @@ def main() -> None:
             },
         )
         st.download_button(
-            "Download monthly summary CSV",
+            "Download summary CSV",
             data=df_to_csv_bytes(summary_display),
-            file_name="monthly_summary_export.csv",
+            file_name="summary_export.csv",
             mime="text/csv",
             on_click=save_report_snapshot,
-            args=(summary_display, "monthly_summary_report"),
+            args=(summary_display, "summary_report"),
         )
 
 

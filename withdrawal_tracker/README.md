@@ -77,12 +77,21 @@ Click **Save Transaction**.
 
 ### Calculations
 
+Wise takes its fee **before** conversion, so the USD Amount you enter
+(the total debited from your account) already includes the fee — the
+Fees field for Wise is informational only and does not add to cost.
+
+ATM surcharges are separate charges billed on top of the USD debited
+for the pesos, so they only add to cost when your bank does **not**
+refund them. If your bank refunds ATM surcharges, leave Fees at `0`.
+
 ```
-net_usd_cost   = usd_amount + fees_usd
+net_usd_cost   = usd_amount + fees_usd  (ATM only)
+net_usd_cost   = usd_amount             (Wise)
 effective_rate = peso_amount / net_usd_cost
 ```
 
-**Example 1 — ATM with surcharge**
+**Example 1 — ATM with unrefunded surcharge**
 
 ```
 peso_amount    = 20,000.00
@@ -93,15 +102,15 @@ net_usd_cost   = 330.09 + 4.08 = 334.17
 effective_rate = 20000 / 334.17 = 59.8497
 ```
 
-**Example 2 — Wise with fee**
+**Example 2 — Wise (fee already in USD Amount)**
 
 ```
-peso_amount    = 10,035.00
-usd_amount     = 162.86
-fees           = 1.21
+peso_amount    = 10,000.00
+usd_amount     = 168.83   (includes $6.10 Wise fee)
+fees           = 6.10     (informational; not added again)
 
-net_usd_cost   = 162.86 + 1.21 = 164.07
-effective_rate = 10035 / 164.07 = 61.1629
+net_usd_cost   = 168.83
+effective_rate = 10000 / 168.83 = 59.2313
 ```
 
 ### Comparison against the daily reference rate
@@ -117,12 +126,12 @@ usd_gain_loss_vs_reference  = reference_usd_cost - net_usd_cost
 - **Positive** gain/loss = you did **better** than that day's reference.
 - **Negative** gain/loss = you did **worse** than that day's reference.
 
-### Monthly summary
+### All-time summary
 
-Grouped by month, showing total pesos, total net USD cost, average
-effective rate overall and per method, total ATM fees, total Wise fees,
-total gain/loss vs. reference, and which method had the better average
-effective rate that month.
+A single-row overall summary across every transaction: total pesos,
+total net USD cost, average effective rate overall and per method,
+total ATM fees, total Wise fees, total gain/loss vs. reference, and
+which method had the better average effective rate.
 
 ### Export
 
