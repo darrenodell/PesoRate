@@ -291,53 +291,33 @@ def _rate_for(rates: pd.DataFrame, d: date_cls) -> float | None:
 def render_transaction_form(rates: pd.DataFrame) -> None:
     st.subheader("Add Transaction")
 
-    today = date_cls.today()
+    with st.form("transaction_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            tx_date = st.date_input("Date", value=date_cls.today())
+            tx_usd = st.number_input(
+                "USD Amount",
+                min_value=0.0,
+                step=1.0,
+                format="%.2f",
+            )
+            tx_peso = st.number_input(
+                "Peso Amount",
+                min_value=0.0,
+                step=100.0,
+                format="%.2f",
+            )
+        with col2:
+            tx_method = st.selectbox("Method", METHODS)
+            tx_fees = st.number_input(
+                "Fees (USD)",
+                min_value=0.0,
+                step=0.01,
+                format="%.2f",
+            )
+            tx_notes = st.text_input("Notes")
 
-    defaults = {
-        "tx_date": today,
-        "tx_method": METHODS[0],
-        "tx_peso": 0.0,
-        "tx_usd": 0.0,
-        "tx_fees": 0.0,
-        "tx_notes": "",
-    }
-    if st.session_state.pop("_tx_reset", False):
-        for k, v in defaults.items():
-            st.session_state[k] = v
-    for k, v in defaults.items():
-        st.session_state.setdefault(k, v)
-
-    last_saved = st.session_state.pop("_tx_last_saved", None)
-    if last_saved:
-        st.success(last_saved)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.date_input("Date", key="tx_date")
-        st.number_input(
-            "USD Amount",
-            min_value=0.0,
-            step=1.0,
-            format="%.2f",
-            key="tx_usd",
-        )
-        st.number_input(
-            "Peso Amount",
-            min_value=0.0,
-            step=100.0,
-            format="%.2f",
-            key="tx_peso",
-        )
-    with col2:
-        st.selectbox("Method", METHODS, key="tx_method")
-        st.number_input(
-            "Fees (USD)",
-            min_value=0.0,
-            step=0.01,
-            format="%.2f",
-            key="tx_fees",
-        )
-        st.text_input("Notes", key="tx_notes")
+        submitted = st.form_submit_button("Save Transaction")
 
     st_components.html(
         """
@@ -361,20 +341,15 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
         height=0,
     )
 
-    submitted = st.button("Save Transaction")
-
     if submitted:
-        tx_date = st.session_state.tx_date
-        method = st.session_state.tx_method
-        peso_amount = float(st.session_state.tx_peso)
-        usd_amount = float(st.session_state.tx_usd)
-        fees_usd = float(st.session_state.tx_fees)
-        notes = st.session_state.tx_notes
+        peso_amount = float(tx_peso)
+        usd_amount = float(tx_usd)
+        fees_usd = float(tx_fees)
 
         errors = []
         if tx_date is None:
             errors.append("Date is required.")
-        if not method:
+        if not tx_method:
             errors.append("Method is required.")
         if peso_amount <= 0:
             errors.append("Peso amount must be greater than zero.")
@@ -392,19 +367,17 @@ def render_transaction_form(rates: pd.DataFrame) -> None:
         append_transaction(
             {
                 "date": tx_date.isoformat(),
-                "method": method,
+                "method": tx_method,
                 "peso_amount": round(peso_amount, 2),
                 "usd_amount": round(usd_amount, 2),
                 "fees_usd": round(fees_usd, 2),
-                "notes": notes.strip(),
+                "notes": tx_notes.strip(),
             }
         )
-        st.session_state._tx_last_saved = (
-            f"Saved: {method} on {tx_date.isoformat()} — "
+        st.success(
+            f"Saved: {tx_method} on {tx_date.isoformat()} — "
             f"effective rate {peso_amount / net:.4f}"
         )
-        st.session_state._tx_reset = True
-        st.rerun()
 
 
 def render_data_io_sidebar() -> None:
@@ -476,7 +449,7 @@ def render_daily_rate_sidebar(rates: pd.DataFrame) -> None:
         else:
             upsert_daily_rate(rate_date, float(reference_rate))
             st.sidebar.success(f"Saved rate for {rate_date.isoformat()}: {reference_rate:.4f}")
-            st.rerun()
+            rates = load_daily_rates()
 
     if not rates.empty:
         st.sidebar.markdown("**Saved Rates**")
@@ -502,6 +475,7 @@ def main() -> None:
 
     rates = load_daily_rates()
     render_daily_rate_sidebar(rates)
+    rates = load_daily_rates()
 
     transactions = load_transactions()
     render_onboarding(transactions)
