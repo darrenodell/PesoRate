@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import date as date_cls, datetime
 from io import StringIO
 
@@ -580,7 +581,12 @@ def main() -> None:
         hydrate_from_local_storage()
         if not st.session_state.get("_ls_hydrated"):
             st.info("Loading your saved data from this browser…")
-            return
+            # The localStorage component doesn't reliably fire a rerun when
+            # the stored key is empty (first-time users), so give it a beat
+            # to mount and then force one ourselves. hydrate() bails out
+            # after 2 attempts, so this loop can't spin forever.
+            time.sleep(0.7)
+            st.rerun()
 
     render_data_io_sidebar()
 
